@@ -3,8 +3,10 @@ package main
 import (
 	"investasi/config"
 	"investasi/database"
+	"investasi/helper"
 	"math/rand"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -55,8 +57,10 @@ type User struct {
 	Usia              uint   `json:"usia" form:"usia"`
 	Email             string `gorm:"unique" json:"email" form:"email"`
 	Perokok           string `json:"perokok" form:"perokok"`
-	Nominal           int    `json:"nominal" form:"nominal" `
-	LamaInvestasi     int    `json:"lama_investasi" form:"lama_investasi"`
+	Role              uint   `json:"role" form:"role"`
+	Token             string `json:"token" form:"token" gorm:"-:migration;<-:false" `
+	Nominal           int    `json:"nominal" form:"nominal" gorm:"-:migration;<-:false" `
+	LamaInvestasi     int    `json:"lama_investasi" form:"lama_investasi" gorm:"-:migration;<-:false"`
 	PeriodePembayaran string `json:"periode_pembayaran" form:"periode_pembayaran" gorm:"-:migration;<-:false"`
 	MetodeBayar       string `json:"metode_bayar" form:"metode_bayar" gorm:"-:migration;<-:false"`
 }
@@ -77,7 +81,18 @@ type Transaction struct {
 }
 
 type UpdateFormat struct {
-	Status string `json:"status" form:"status"`
+	Nama              string `json:"nama" form:"nama"`
+	JenisKelamin      string `json:"jenis_kelamin" form:"jenis_kelamin"`
+	Usia              uint   `json:"usia" form:"usia"`
+	Nominal           int    `json:"nominal" form:"nominal"`
+	LamaInvestasi     int    `json:"lama_investasi" form:"lama_investasi"`
+	PeriodePembayaran string `json:"periode_pembayaran" form:"periode_pembayaran"`
+	MetodeBayar       string `json:"metode_bayar" form:"metode_bayar"`
+	Status            string `json:"status" form:"status"`
+}
+
+type LoginFormat struct {
+	Email string `json:"email" form:"email"`
 }
 
 func Initial() echo.HandlerFunc {
@@ -164,7 +179,7 @@ func Trx(db *gorm.DB) echo.HandlerFunc {
 		transaksi.LamaInvestasi = input.LamaInvestasi
 		transaksi.PeriodePembayaran = input.PeriodePembayaran
 		transaksi.MetodeBayar = input.MetodeBayar
-
+		input.Role = 0
 		if input.PeriodePembayaran == "tahunan" {
 			totalBayar := float64(input.Nominal - (input.Nominal / 12))
 			formatRupiah := rupiah.FormatRupiah(totalBayar)
@@ -221,17 +236,65 @@ func GetData(db *gorm.DB) echo.HandlerFunc {
 
 func UpdateData(db *gorm.DB) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		var input UpdateFormat
 		var cnv Transaction
 		ID, _ := strconv.Atoi(c.Param("id"))
-		if err := c.Bind(&input); err != nil {
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "cannot bind input data",
+		userID, role := helper.ExtractToken(c)
+		if userID == 0 {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"message": "cant validate token",
+			})
+		} else if role == 1 {
+			var input UpdateFormat
+			if err := c.Bind(&input); err != nil {
+				return c.JSON(http.StatusBadRequest, map[string]interface{}{
+					"message": "cannot bind input data",
+				})
+			}
+			cnv.Nama = input.Nama
+			cnv.JenisKelamin = input.JenisKelamin
+			cnv.Usia = input.Usia
+			cnv.Nominal = input.Nominal
+			cnv.LamaInvestasi = input.LamaInvestasi
+			cnv.PeriodePembayaran = input.PeriodePembayaran
+			cnv.MetodeBayar = input.MetodeBayar
+			cnv.Status = "Edit"
+			if err := db.Where("id = ?", ID).Updates(&cnv).Error; err != nil {
+				log.Error("error on updating user", err.Error())
+				return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+					"message": "there is a problem on server",
+				})
+			} else {
+				return c.JSON(http.StatusOK, map[string]interface{}{
+					"message": "success",
+					"status":  200,
+					"data":    cnv,
+				})
+			}
+		} else {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"message": "for supervisor",
 			})
 		}
-		cnv.Status = input.Status
+	}
+}
+
+func DeleteDate(db *gorm.DB) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		var cnv Transaction
+		ID, _ := strconv.Atoi(c.Param("id"))
+		userID, role := helper.ExtractToken(c)
+		if role != 1 {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"message": "for supervisor",
+			})
+		} else if userID == 0 {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"message": "cant validate token",
+			})
+		}
+		cnv.Status = "Hapus"
 		if err := db.Where("id = ?", ID).Updates(&cnv).Error; err != nil {
-			log.Error("error on updating user", err.Error())
+			log.Error("error on delete data", err.Error())
 			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 				"message": "there is a problem on server",
 			})
@@ -239,11 +302,37 @@ func UpdateData(db *gorm.DB) echo.HandlerFunc {
 		return c.JSON(http.StatusOK, map[string]interface{}{
 			"message": "success",
 			"status":  200,
-			"data":    cnv,
+			"data":    cnv.Status,
 		})
 
 	}
+}
 
+func login(db *gorm.DB) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		var input LoginFormat
+		var cnv User
+		if err := c.Bind(&input); err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "cannot bind input data",
+			})
+		}
+		if err := db.Table("users").First(&cnv, "email = ?", input.Email).Error; err != nil {
+			log.Error("error on login", err.Error())
+			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+				"message": "there is a problem on server",
+			})
+		} else if cnv.ID != 0 {
+			cnv.Token = helper.GenerateToken(uint(cnv.ID), cnv.Role)
+			return c.JSON(http.StatusOK, map[string]interface{}{
+				"message": "success",
+				"status":  200,
+				"data":    cnv.Token,
+			})
+		}
+		return nil
+
+	}
 }
 
 func main() {
@@ -258,10 +347,12 @@ func main() {
 	e.Use(middleware.CORS())
 	e.Use(middleware.Logger())
 
+	e.POST("/login", login(db))
 	e.POST("/info", Initial())
 	e.POST("/invest", Trx(db))
 	e.GET("/invest", GetData(db))
-	e.PUT("/invest/:id", UpdateData(db))
+	e.PUT("/invest/:id", UpdateData(db), middleware.JWT([]byte(os.Getenv("JWTSecret"))))
+	e.DELETE("/invest/:id", DeleteDate(db), middleware.JWT(([]byte(os.Getenv("JWTSecret")))))
 
 	e.Logger.Fatal(e.Start(":8000"))
 
